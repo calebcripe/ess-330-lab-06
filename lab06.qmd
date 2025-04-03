@@ -3,6 +3,8 @@ title: "ess-330-lab06"
 author: "Caleb Cripe"
 format: html
 editor: visual
+execute: 
+  echo: true
 ---
 
 # Project Setup
@@ -68,5 +70,221 @@ map_pmean + map_aridity + plot_layout(widths = c(1, 1))
 ```
 
 # Question 3
+```{r}
+set.seed(64)
 
+camels <- camels |> 
+  mutate(logQmean = log(q_mean))
+
+camels_split <- initial_split(camels, prop = 0.8)
+camels_train <- training(camels_split)
+camels_test  <- testing(camels_split)
+
+camels_cv <- vfold_cv(camels_train, v = 10)
+rec <-  recipe(logQmean ~ aridity + p_mean, data = camels_train) %>%
+  step_log(all_predictors()) %>%
+  step_interact(terms = ~ aridity:p_mean) |> 
+  step_naomit(all_predictors(), all_outcomes())
+
+baked_data <- prep(rec, camels_train) |> 
+  bake(new_data = NULL)
+
+lm_base <- lm(logQmean ~ aridity * p_mean, data = baked_data)
+summary(lm_base)
+
+summary(lm(logQmean ~ aridity + p_mean + aridity_x_p_mean, data = baked_data))
+
+test_data <-  bake(prep(rec), new_data = camels_test)
+test_data$lm_pred <- predict(lm_base, newdata = test_data)
+
+install.packages("yardstick")
+library(yardstick)
+metrics(test_data, truth = logQmean, estimate = lm_pred)
+
+ggplot(test_data, aes(x = logQmean, y = lm_pred, colour = aridity)) +
+  scale_color_gradient2(low = "brown", mid = "orange", high = "darkgreen") +
+  geom_point() +
+  geom_abline(linetype = 2) +
+  theme_linedraw() + 
+  labs(title = "Linear Model: Observed vs Predicted",
+       x = "Observed Log Mean Flow",
+       y = "Predicted Log Mean Flow",
+       color = "Aridity")
+
+install.packages("parsnip")
+library(parsnip)
+library(workflows)
+lm_model <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression") 
+
+lm_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(lm_model) %>%
+  fit(data = camels_train) 
+
+summary(extract_fit_engine(lm_wf))$coefficients
+
+summary(lm_base)$coefficients
+
+lm_data <- augment(lm_wf, new_data = camels_test)
+dim(lm_data)
+```
+
+```{r}
+metrics(lm_data, truth = logQmean, estimate = .pred)
+
+ggplot(lm_data, aes(x = logQmean, y = .pred, colour = aridity)) +
+  scale_color_viridis_c() +
+  geom_point() +
+  geom_abline() +
+  theme_linedraw()
+
+library(baguette)
+rf_model <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+install.packages("ranger")
+library(ranger)
+
+rf_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(rf_model) %>%
+  fit(data = camels_train)
+
+rf_data <- augment(rf_wf, new_data = camels_test)
+dim(rf_data)
+
+metrics(rf_data, truth = logQmean, estimate = .pred)
+
+ggplot(rf_data, aes(x = logQmean, y = .pred, colour = aridity)) +
+  scale_color_viridis_c() +
+  geom_point() +
+  geom_abline() +
+  theme_linedraw()
+```
+
+```{r}
+wf <- workflow_set(list(rec), list(lm_model, rf_model)) %>%
+  workflow_map('fit_resamples', resamples = camels_cv) 
+
+autoplot(wf)
+
+rank_results(wf, rank_metric = "rsq", select_best = TRUE)
+```
+
+## My Turn!
+```{r}
+install.packages("xgboost")
+library(xgboost)
+
+xg_model <- boost_tree() %>%
+  set_engine("xgboost") %>%
+  set_mode("regression") 
+
+xg_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(xg_model) %>%
+  fit(data = camels_train)
+
+nn_model <- mlp() %>%
+  set_engine("nnet") %>%
+  set_mode("regression") 
+
+nn_wf <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(nn_model) %>%
+  fit(data = camels_train)
+
+wf <- workflow_set(list(rec), list(lm_model, rf_model, xg_model, nn_model)) %>%
+  workflow_map('fit_resamples', resamples = camels_cv) 
+
+autoplot(wf)
+
+rank_results(wf, rank_metric = "rsq", select_best = TRUE)
+```
+
+After evaluating the models and comparing them, I would choose to move forward with the neural network model. It's rsq was the highest of the four and it had the lowest rmse, indicating that it is the most effective model. 
+
+# Question 4
+```{r}
+set.seed(64)
+
+cm <- camels |> 
+  mutate(logQmean = log(q_mean)) |>
+  select(logQmean, p_mean, aridity, soil_depth_pelletier, max_water_content, organic_frac, frac_snow, pet_mean, soil_depth_statsgo, elev_mean) |>
+  drop_na()
+
+cm_split <- initial_split(cm, prop = 0.75)
+cm_train <- training(cm_split)
+cm_test  <- testing(cm_split)
+
+cm_cv <- vfold_cv(cm_train, v = 10)
+```
+
+```{r}
+rec2 <-  recipe(logQmean ~ ., data = cm_train) %>%
+  step_scale(p_mean, aridity, soil_depth_pelletier, max_water_content, organic_frac, frac_snow, pet_mean, soil_depth_statsgo, elev_mean) %>%
+  step_center(p_mean, aridity, soil_depth_pelletier, max_water_content, organic_frac, frac_snow, pet_mean, soil_depth_statsgo, elev_mean)
+
+bkd_data <- prep(rec2, cm_train) |> 
+  bake(new_data = NULL)
+```
+
+I chose this recipe because it aggregates the predictor variables under the logQmean, and ensures that they are all comparable. Using step_scale and step_center makes it so all of the predictor variables are more readily analyzable across a similar plane, reducing variability in the results. 
+
+```{r}
+rf_md <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+xg_md <- boost_tree() %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+nn_md <- mlp() %>%
+  set_engine("nnet") %>%
+  set_mode("regression") 
+```
+
+```{r}
+wkfl <- workflow_set(list(rec2), list(rf_md, 
+                                   xg_md,
+                                   nn_md)) |>
+  workflow_map("fit_resamples", resamples = cm_cv)
+```
+
+```{r}
+autoplot(wkfl)
+
+rank_results(wkfl, rank_metric = "rsq", select_best = TRUE)
+```
+
+I think the random forest model would be the best for evaluating the data, since it had an rsq of 0.9 and had the lowest r mean standard error out of the three models I tested. When ranked by rsq, the random forest model was ranked number 1, indicating that the metrics for ranking the models favored the random forest model. 
+
+```{r}
+set.seed(64)
+
+rf_wf <- workflow() %>%
+  add_recipe(rec2) %>%
+  add_model(rf_md)
+  
+rf_fit <- rf_wf %>%
+  fit(data = cm_train)
+
+rf_predictions <- augment(rf_fit, new_data = cm_test)
+
+ggplot(rf_predictions, aes(x = logQmean, y = .pred)) +
+  geom_point(color = "blue", alpha = 0.6) + 
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Observed vs. Predicted Log Mean Streamflow",
+    x = "Observed logQmean",
+    y = "Predicted logQmean"
+  ) +
+  theme_bw()
+```
+
+After testing my model with the data, accounting for the various predictor variables, I found that the observed values align with the predicted values fairly closely. Most of the values are skewed to the right side of the graph and centered around the 0,0 point, indicating that the model might not have captured a large amount of variability, which could be a result of being skewed towards smaller values or not having enough predictor variables to account for this. Otherwise, the model seems to be an accurate representation of the logQmean data and reflects the relationship between the predicted and observed values. 
 
