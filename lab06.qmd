@@ -1,0 +1,72 @@
+---
+title: "ess-330-lab06"
+author: "Caleb Cripe"
+format: html
+editor: visual
+---
+
+# Project Setup
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+library(tidyverse)
+library(tidymodels)
+install.packages("powerjoin")
+library(powerjoin)
+install.packages("glue")
+library(glue)
+install.packages("vip")
+library(vip)
+install.packages("baguette")
+library(baguette)
+
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 
+              'data/camels_attributes_v2.0.pdf')
+
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+
+remote_files  <- glue('{root}/camels_{types}.txt')
+local_files   <- glue('data/camels_{types}.txt')
+
+walk2(remote_files, local_files, download.file, quiet = TRUE)
+
+camels <- map(local_files, read_delim, show_col_types = FALSE) 
+
+camels <- power_full_join(camels ,by = 'gauge_id')
+```
+
+# Question 1
+The zero_q_freq variable represents the frequency of days with Q = 0 mm/day in units of %, which was sourced from UGSG data. I found this by going into my data folder, opening the camels attributed pdf file, and scrolling down to find the variable.
+
+# Question 2
+```{r}
+install.packages("ggthemes")
+install.packages("ggplot2")
+install.packages("patchwork")
+library(ggthemes)
+library(ggplot2)
+library(patchwork)
+
+map_pmean <- ggplot(data = camels, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray50") +
+  geom_point(aes(color = p_mean)) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  ggthemes::theme_map() +
+  ggtitle("Map of Site P-Mean") +
+  labs(color = "p_mean")
+
+map_aridity <- ggplot(data = camels, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray50") +
+  geom_point(aes(color = aridity)) +
+  scale_color_gradient(low = "yellow", high = "red") +
+  ggthemes::theme_map() +
+  ggtitle("Map of Site Aridity") +
+  labs(color = "aridity")
+
+map_pmean + map_aridity + plot_layout(widths = c(1, 1))
+```
+
+# Question 3
+
+
