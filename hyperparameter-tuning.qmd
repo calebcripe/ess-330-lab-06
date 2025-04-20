@@ -1,0 +1,238 @@
+---
+title: "ESS330 Lab_08"
+author: "Caleb Cripe"
+format: html
+editor: visual
+execute: 
+  echo: true
+---
+
+# Data Import/Tidy/Transform
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+library(tidyverse)
+library(tidymodels)
+library(powerjoin)
+library(glue)
+library(vip)
+library(baguette)
+library(dplyr)
+library(tidyr)
+library(skimr)
+library(visdat)
+library(ggpubr)
+library(ggplot2)
+library(ggthemes)
+library(ranger)
+library(dials)
+library(patchwork)
+```
+
+```{r}
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 
+              'data/camels_attributes_v2.0.pdf')
+
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+
+remote_files  <- glue('{root}/camels_{types}.txt')
+local_files   <- glue('data/camels_{types}.txt')
+
+walk2(remote_files, local_files, download.file, quiet = TRUE)
+
+camels <- map(local_files, read_delim, show_col_types = FALSE) 
+
+camels <- power_full_join(camels ,by = 'gauge_id')
+```
+
+```{r}
+glimpse(camels)
+vis_miss(camels)
+
+camels_clean <- camels %>% 
+  distinct() %>%
+  drop_na()
+
+skim(camels_clean)
+
+map_qmean <- ggplot(data = camels_clean, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray50") +
+  geom_point(aes(color = q_mean)) +
+  scale_color_gradient(low = "tomato", high = "lightgreen") +
+  ggthemes::theme_map() +
+  ggtitle("Map of Site Q-Mean") +
+  labs(color = "q_mean")
+
+print(map_qmean)
+```
+
+# Data Splitting
+```{r}
+set.seed(64)
+
+camels_clean <- camels_clean |> 
+  mutate(logQmean = log(q_mean))
+
+cc_split <- initial_split(camels_clean, prop = 0.8)
+cc_train <- training(cc_split)
+cc_test  <- testing(cc_split)
+```
+
+# Feature Engineering
+```{r}
+recipe_cc <-  recipe(logQmean ~ aridity + p_mean, data = cc_train) %>%
+  step_log(all_predictors()) %>%
+  step_interact(terms = ~ aridity:p_mean) |> 
+  step_naomit(all_predictors(), all_outcomes())
+
+cc_baked_data <- prep(recipe_cc, cc_train) |> 
+  bake(new_data = NULL)
+```
+
+# Resampling and Model Testing
+```{r}
+camels_cc_cv <- vfold_cv(cc_train, v = 10)
+
+lm_model_cc <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression") 
+
+lm_wf_cc <- workflow() %>%
+  add_recipe(recipe_cc) %>%
+  add_model(lm_model_cc) %>%
+  fit(data = cc_train) 
+
+rf_model_cc <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+rf_wf_cc <- workflow() %>%
+  add_recipe(recipe_cc) %>%
+  add_model(rf_model_cc) %>%
+  fit(data = cc_train)
+
+xg_model_cc <- boost_tree() %>%
+  set_engine("xgboost") %>%
+  set_mode("regression") 
+
+xg_wf_cc <- workflow() %>%
+  add_recipe(recipe_cc) %>%
+  add_model(xg_model_cc) %>%
+  fit(data = cc_train)
+
+wf_cc <- workflow_set(list(recipe_cc), list(lm_model_cc, rf_model_cc, xg_model_cc)) %>%
+  workflow_map('fit_resamples', resamples = camels_cc_cv) 
+
+autoplot(wf_cc)
+```
+
+After visualizing the model metrics, I selected the random forest model for my model tuning. The random forest model has the highest rsq value out of the three models, as well as having the lowest mean standard error. Random forest is a regression model, which I have chosen to run with the "ranger" engine. I think it will work well for this problems because it handles nonlinear relationships efficiently and reduces overfitting. 
+
+# Model Tuning
+```{r}
+rf_tuned_cc <- rand_forest(
+  mtry = tune(),
+  trees = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+rf_wf_cc <- workflow() %>%
+  add_recipe(recipe_cc) %>%
+  add_model(rf_tuned_cc)
+
+dials <- extract_parameter_set_dials(rf_tuned_cc) %>%
+  finalize(cc_train)
+
+dials$object
+
+set.seed(64)
+my.grid <- grid_space_filling(dials, size = 25)
+```
+
+```{r}
+model_params <-  tune_grid(
+    rf_wf_cc,
+    resamples = camels_cc_cv,
+    grid = my.grid,
+    metrics = metric_set(rmse, rsq, mae),
+    control = control_grid(save_pred = TRUE)
+  )
+
+autoplot(model_params)
+```
+
+After visualizing the results of the tuning process, I found that the mae, rmse, and rsq were pretty consistent for both the randomly selected predictor and the # of trees. This indicates that I can select a lower trees value and still get the same results as a higher value. 
+
+```{r}
+collect_metrics(model_params)
+
+show_best(model_params, metric = "mae")
+
+hp_best <- select_best(model_params, metric = "mae")
+``` 
+
+After returning the best results for hyperparameters, I found that the top five results had nearly identical mse. The minimal variability between these top performing results suggests that a wide varitey of combinations would produce good returns for the model. However, a mtry of 1 and 1167 trees produced the lowest overall mse, meaning that it is the most reliable result. 
+
+```{r}
+rf_final_wf <- finalize_workflow(
+  rf_wf_cc,
+  hp_best
+)
+```
+
+# Final Model Verification
+```{r}
+rf_final_fit <- last_fit(
+  rf_final_wf,
+  split = cc_split
+)
+
+collect_metrics(rf_final_fit)
+
+predictions <- collect_predictions(rf_final_fit)
+
+ggplot(predictions, aes(x = .pred, y = logQmean)) +
+  geom_point(aes(color = logQmean), alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  geom_abline(linetype = "dashed", color = "red") +       
+  scale_color_viridis_c() +   
+  labs(
+    title = "Predicted vs Actual logQmean Values",
+    x = "Predicted Value",
+    y = "Actual Value",
+    color = "Actual Value"
+  ) +
+  theme_bw()
+```
+
+Against the test data, there is a strong correlation between the models predicted data and the actual data. Most of the plots on the graph align with the line, indicating that while there is some prediction error at extreme case points, majority of the predicted data was accurate. 
+
+# Building a Map
+```{r}
+final_rf_fit <- fit(rf_final_wf, data = camels_clean)
+
+rf_predictions <- augment(final_rf_fit, new_data = camels_clean) %>%
+  mutate(residual = (.pred - logQmean)^2)
+
+prediction_map <- ggplot(rf_predictions, aes(x = gauge_lon, y = gauge_lat, color = .pred)) +
+  geom_point(size = 1.5) +
+  scale_color_viridis_c(option = "plasma") +
+  coord_fixed(1.3) +
+  labs(title = "Predicted logQmean Values", color = "Prediction") +
+  theme_bw()
+
+resid_map <- ggplot(rf_predictions, aes(x = gauge_lon, y = gauge_lat, color = residual)) +
+  geom_point(size = 1.5) +
+  scale_color_viridis_c(option = "magma") +
+  coord_fixed(1.3) +
+  labs(title = "Prediction Residuals (Squared)", color = "Residual²") +
+  theme_bw()
+
+prediction_map + resid_map
+```
+
+
+
+
